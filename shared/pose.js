@@ -175,28 +175,55 @@
       }
     }
 
-    var pose = new global.Pose({
-      locateFile: function (file) {
-        return "https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/" + file;
+    var landmarker = null;
+    var lastVideoTime = -1;
+
+    function normalise(list) {
+      var maxVis = 0;
+      for (var i = 0; i < list.length; i++) {
+        var v = list[i] && typeof list[i].visibility === "number" ? list[i].visibility : 0;
+        if (v > maxVis) maxVis = v;
       }
-    });
+      if (maxVis > 0.05) return list;
+      /* some builds return 0 visibility for every point — treat them as visible */
+      var out = [];
+      for (var j = 0; j < list.length; j++) {
+        out.push({ x: list[j].x, y: list[j].y, z: list[j].z, visibility: 1 });
+      }
+      return out;
+    }
 
-    pose.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      minDetectionConfidence: 0.6,
-      minTrackingConfidence: 0.6
-    });
+    function loadModel() {
+      import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs")
+        .then(function (vision) {
+          return vision.FilesetResolver
+            .forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm")
+            .then(function (fileset) {
+              return vision.PoseLandmarker.createFromOptions(fileset, {
+                baseOptions: {
+                  modelAssetPath:
+                    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+                  delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numPoses: 1,
+                minPoseDetectionConfidence: 0.5,
+                minPosePresenceConfidence: 0.5,
+                minTrackingConfidence: 0.5
+              });
+            });
+        })
+        .then(function (lm) { landmarker = lm; })
+        .catch(function () { landmarker = null; });
+    }
 
-    pose.onResults(function (results) {
-      if (!canvas.width || !canvas.height) resize();
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    function render() {
+      requestAnimationFrame(render);
 
-      var image = results.image;
-      var vw = (image && image.width) || video.videoWidth;
-      var vh = (image && image.height) || video.videoHeight;
-      if (!vw || !vh) return;
+      var vw = video.videoWidth;
+      var vh = video.videoHeight;
+      if (!vw || !vh || video.readyState < 2) return;
+      if (canvas.width !== global.innerWidth || canvas.height !== global.innerHeight) resize();
 
       var scale = Math.max(canvas.width / vw, canvas.height / vh);
       var drawW = vw * scale;
@@ -204,28 +231,29 @@
       var offsetX = (canvas.width - drawW) / 2;
       var offsetY = (canvas.height - drawH) / 2;
 
-      if (image) ctx.drawImage(image, offsetX, offsetY, drawW, drawH);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
 
-      var landmarks = results.poseLandmarks;
-      if (!landmarks || landmarks.length === 0) return;
+      if (!landmarker) return;
 
-      options.onFrame(landmarks, {
-        width: vw,
-        height: vh,
-        now: performance.now()
-      });
+      var now = performance.now();
+      if (video.currentTime === lastVideoTime) return;
+      lastVideoTime = video.currentTime;
 
+      var result;
+      try {
+        result = landmarker.detectForVideo(video, now);
+      } catch (e) {
+        return;
+      }
+      if (!result || !result.landmarks || !result.landmarks.length) return;
+
+      var landmarks = normalise(result.landmarks[0]);
+      options.onFrame(landmarks, { width: vw, height: vh, now: now });
       drawSkeleton(landmarks, drawW, drawH, offsetX, offsetY);
-    });
+    }
 
     var running = false;
-
-    function loop() {
-      if (video.readyState >= 2) {
-        pose.send({ image: video }).catch(function () { /* ignore frame errors */ });
-      }
-      requestAnimationFrame(loop);
-    }
 
     function startCamera() {
       if (running) return;
@@ -244,11 +272,16 @@
           notice.classList.add("visible");
           return;
         }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          running = false;
+          notice.classList.add("visible");
+          return;
+        }
         navigator.mediaDevices.getUserMedia(attempts[i]).then(function (stream) {
           video.srcObject = stream;
           return video.play();
         }).then(function () {
-          requestAnimationFrame(loop);
+          requestAnimationFrame(render);
         }).catch(function () {
           next(i + 1);
         });
@@ -262,6 +295,7 @@
       });
     }
 
+    loadModel();
     startCamera();
     setInterval(function () { send(options.payload()); }, SEND_INTERVAL_MS);
   }

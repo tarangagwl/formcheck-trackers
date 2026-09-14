@@ -126,6 +126,7 @@
           facingSign: wristX - shoulderX >= 0 ? 1 : -1,
           maxTorsoAngle: angleDeg,
           maxDriftNorm: 0,
+          peaked: false,
           minWristY: wristY,
           peakShoulderX: shoulderX,
           peakWristX: wristX,
@@ -155,7 +156,9 @@
           ((repData.peakWristX - repData.peakShoulderX) * repData.facingSign) / repData.peakTorsoLen;
         liveLockoutBad = lockoutNormLive > LOCKOUT_SCORE2_NORM && diffNorm > START_MOVE_FRAC * 2;
 
-        if (diffNorm < RETURN_MARGIN_FRAC) {
+        if (diffNorm > RETURN_MARGIN_FRAC * 1.5) repData.peaked = true;
+
+        if (repData.peaked && diffNorm < RETURN_MARGIN_FRAC) {
           var travelNorm = (repData.startShoulderY - repData.minWristY) / torsoLen;
           if (travelNorm >= REP_MIN_TRAVEL_FRAC) completeRep(repData);
           repState = "idle";

@@ -24,9 +24,12 @@
   };
 
   var VIS_THRESHOLD = 0.45;
-  var DRAW_VIS_THRESHOLD = 0.25;
+  var DRAW_VIS_THRESHOLD = 0.18;
   /* how long a skeleton stays on screen after the last successful detection */
   var HOLD_MS = 700;
+  /* Keep individual joints briefly when their confidence dips. This matters
+     most when a lifter steps back and wrists/ankles occupy very few pixels. */
+  var JOINT_HOLD_MS = 1200;
   var SEND_INTERVAL_MS = 500;
 
   var CONNECTIONS = [
@@ -105,7 +108,7 @@
     };
   }
 
-  /* --------------------------------------------------------------- messaging */
+  /* ------------------------------------------------------------ messaging */
 
   function send(payload) {
     var json = JSON.stringify(payload);
@@ -120,7 +123,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* --------------------------------------------------------------- runtime */
+  /* -------------------------------------------------------------- runtime */
 
   /**
    * options.onFrame(landmarks, ctx) -> void
@@ -151,7 +154,7 @@
         return { x: p.x * drawW + offsetX, y: p.y * drawH + offsetY };
       }
 
-      /* app palette: primary #6C63FF, darker joint purple #4A44B5, success #6BCB77, error #FF6B6D */
+      /* app palette: primary #6C63FF, darker joint purple #4A44B5, success #6BCB77, error #FF6B6B */
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
@@ -188,7 +191,7 @@
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = bad ? "#FF6B6D" : "#4A44B5";
+        ctx.fillStyle = bad ? "#FF6B6B" : "#4A44B5";
         ctx.fill();
         ctx.lineWidth = 2;
         ctx.strokeStyle = bad ? "rgba(255, 107, 107, 0.9)" : "rgba(74, 68, 181, 0.95)";
@@ -218,6 +221,8 @@
     var heldLandmarks = null;
     var heldAt = 0;
     var smoothed = null;
+    var jointCache = [];
+    var analysisErrorShown = false;
 
     /* Exponential smoothing of the drawn skeleton. Analysis still uses the raw
        landmarks so tuned thresholds are unaffected; this only steadies the
@@ -241,6 +246,31 @@
         s.visibility = v > sv ? v : sv + (v - sv) * 0.2;
       }
       return smoothed;
+    }
+
+    function holdLowConfidenceJoints(list, now) {
+      var output = [];
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i];
+        var visibility = p && typeof p.visibility === "number" ? p.visibility : 0;
+        if (p && visibility >= DRAW_VIS_THRESHOLD) {
+          jointCache[i] = {
+            point: { x: p.x, y: p.y, z: p.z, visibility: visibility },
+            at: now
+          };
+          output.push(p);
+        } else if (jointCache[i] && now - jointCache[i].at <= JOINT_HOLD_MS) {
+          output.push({
+            x: jointCache[i].point.x,
+            y: jointCache[i].point.y,
+            z: jointCache[i].point.z,
+            visibility: DRAW_VIS_THRESHOLD
+          });
+        } else {
+          output.push(p);
+        }
+      }
+      return output;
     }
 
 
@@ -291,6 +321,7 @@
     }
 
 
+
     function render() {
       requestAnimationFrame(render);
 
@@ -309,6 +340,7 @@
       ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
 
       if (!landmarker) return;
+
       var now = performance.now();
       var fresh = video.currentTime !== lastVideoTime;
 
@@ -322,9 +354,18 @@
         }
         if (result && result.landmarks && result.landmarks.length) {
           var landmarks = normalise(result.landmarks[0]);
-          heldLandmarks = smooth(landmarks);
+          heldLandmarks = holdLowConfidenceJoints(smooth(landmarks), now);
           heldAt = now;
-          options.onFrame(landmarks, { width: vw, height: vh, now: now });
+          try {
+            options.onFrame(landmarks, { width: vw, height: vh, now: now });
+          } catch (analysisError) {
+            /* Exercise scoring must never be able to stop the camera/skeleton
+               render loop. Report the first failure and keep drawing. */
+            if (!analysisErrorShown && global.console && global.console.error) {
+              analysisErrorShown = true;
+              global.console.error("FormCheck analysis error", analysisError);
+            }
+          }
         }
       }
 

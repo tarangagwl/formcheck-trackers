@@ -30,8 +30,11 @@
   var DEPTH_PARALLEL_BAND = 0.015; // hip-vs-knee y difference, normalised units
   var TORSO_BAD_DEG = 45;          // lean beyond this scores 1
   var TORSO_WARN_DEG = 30;         // lean beyond this scores 2
-  var HEEL_BAD_PX = 15;            // heel rise beyond this scores 1
-  var HEEL_WARN_PX = 5;            // heel rise beyond this scores 2
+  /* heel lift is measured as a fraction of thigh length, not raw pixels:
+     the heel landmark is noisy in raw pixels, so fixed px thresholds flag
+     planted feet. ~0.06 of thigh length is roughly an inch of rise. */
+  var HEEL_BAD_FRAC = 0.12;        // heel rise beyond this scores 1 (~2 inches)
+  var HEEL_WARN_FRAC = 0.06;       // heel rise beyond this scores 2 (~1 inch)
   var MIN_PHASE_MS = 500;          // minimum descent and ascent duration
 
   function scoreDepth(diff) {
@@ -44,9 +47,9 @@
     if (deg >= TORSO_WARN_DEG) return 2;
     return 3;
   }
-  function scoreHeel(liftPx) {
-    if (liftPx > HEEL_BAD_PX) return 1;
-    if (liftPx >= HEEL_WARN_PX) return 2;
+  function scoreHeel(liftFrac) {
+    if (liftFrac > HEEL_BAD_FRAC) return 1;
+    if (liftFrac >= HEEL_WARN_FRAC) return 2;
     return 3;
   }
 
@@ -62,6 +65,7 @@
   var smoothedHipY = null;
   var prevHipY = null;
   var standingBaselineHipY = null;
+  var smoothedHeelY = null;
   var heelBaselineY = null;
   var descentCandidateStart = null;
   var standCandidateStart = null;
@@ -79,7 +83,7 @@
   var flaggedIndices = [];
   var activeIdx = null;
 
-  function resetRepTrackers(heelY) {
+  function resetRepTrackers(smoothedHeelY) {
     heelBaselineY = heelY;
     wentBelowParallel = false;
     worstDepth = -Infinity;
@@ -87,10 +91,10 @@
     worstHeelLift = 0;
   }
 
-  function trackWorst(depthDiff, torsoAngle, heelY) {
+  function trackWorst(depthDiff, torsoAngle, heelLiftFrac) {
     worstTorso = Math.max(worstTorso, torsoAngle);
     worstDepth = Math.max(worstDepth, depthDiff);
-    if (heelBaselineY !== null) worstHeelLift = Math.max(worstHeelLift, heelBaselineY - heelY);
+    if (heelLiftFrac !== null) worstHeelLift = Math.max(worstHeelLift, heelLiftFrac);
     if (depthDiff >= 0) wentBelowParallel = true;
   }
 
@@ -134,24 +138,33 @@
 
     var depthDiff = hip.y - knee.y;               // positive = hips below knees
     var torsoAngle = FC.angleFromVertical(hip, shoulder);
-    var heelY = heel.y * frame.height;
+    var rawHeelY = heel.y * frame.height;
+    var heelVisible = (heel.visibility || 0) >= FC.VIS_THRESHOLD;
     var legScale = Math.max(FC.dist(hip, knee), 0.03);
+    var legScalePx = legScale * frame.height;
     var now = frame.now;
 
     smoothedHipY = smoothedHipY === null ? hip.y : smoothedHipY * 0.6 + hip.y * 0.4;
     if (prevHipY === null) prevHipY = smoothedHipY;
+    smoothedHeelY = smoothedHeelY === null ? rawHeelY : smoothedHeelY * 0.6 + rawHeelY * 0.4;
 
     var descendEps = legScale * 0.25;
     var standEps = legScale * 0.15;
     var reversalEps = legScale * 0.04;
 
+    /* heel lift as a fraction of thigh length; null when the heel landmark is
+       unreliable, in which case the rep is not penalised for it */
+    var heelLiftFrac = null;
+    if (heelVisible && heelBaselineY !== null) {
+      heelLiftFrac = Math.max(0, (heelBaselineY - smoothedHeelY) / legScalePx);
+    }
+
     /* live scores between reps so the app always has something to show */
-    var liveHeelLift = heelBaselineY === null ? 0 : heelBaselineY - heelY;
     var liveFlags = [];
     if (torsoAngle > TORSO_BAD_DEG) {
       liveFlags.push(idx.shoulder, idx.hip);
     }
-    if (liveHeelLift > HEEL_BAD_PX) liveFlags.push(idx.heel);
+    if (heelLiftFrac !== null && heelLiftFrac > HEEL_BAD_FRAC) liveFlags.push(idx.heel);
     flaggedIndices = liveFlags;
 
     if (phase === "standing") {
@@ -165,20 +178,20 @@
           phase = "descending";
           descentStartTime = descentCandidateStart;
           descentCandidateStart = null;
-          resetRepTrackers(heelY);
+          resetRepTrackers(smoothedHeelY);
         }
       } else {
         descentCandidateStart = null;
       }
     } else if (phase === "descending") {
-      trackWorst(depthDiff, torsoAngle, heelY);
+      trackWorst(depthDiff, torsoAngle, heelLiftFrac);
       if (smoothedHipY < prevHipY - reversalEps) {
         phase = "bottom";
         bottomTime = now;
         bottomHoldStart = now;
       }
     } else if (phase === "bottom") {
-      trackWorst(depthDiff, torsoAngle, heelY);
+      trackWorst(depthDiff, torsoAngle, heelLiftFrac);
       if (smoothedHipY < prevHipY - reversalEps * 0.5) {
         if (now - bottomHoldStart >= 100) {
           phase = "ascending";
@@ -189,7 +202,7 @@
         bottomTime = now;
       }
     } else if (phase === "ascending") {
-      trackWorst(depthDiff, torsoAngle, heelY);
+      trackWorst(depthDiff, torsoAngle, heelLiftFrac);
       if (standingBaselineHipY !== null && smoothedHipY - standingBaselineHipY <= standEps) {
         if (standCandidateStart === null) standCandidateStart = now;
         if (now - standCandidateStart >= MIN_PHASE_MS) {

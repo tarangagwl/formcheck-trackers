@@ -151,14 +151,14 @@
         return { x: p.x * drawW + offsetX, y: p.y * drawH + offsetY };
       }
 
-      /* app palette: primary #6C63FF, success #6BCB77, error #FF6B6B */
+      /* app palette: primary #6C63FF, darker joint purple #4A44B5, success #6BCB77, error #FF6B6B */
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
       for (var pass = 0; pass < 2; pass++) {
         /* pass 0 = soft outer glow, pass 1 = crisp bone */
         ctx.lineWidth = pass === 0 ? 11 : 3.5;
-        ctx.strokeStyle = pass === 0 ? "rgba(108, 99, 255, 0.18)" : "rgba(146, 139, 255, 0.95)";
+        ctx.strokeStyle = pass === 0 ? "rgba(74, 68, 181, 0.18)" : "rgba(108, 99, 255, 0.95)";
         for (var i = 0; i < CONNECTIONS.length; i++) {
           var a = landmarks[CONNECTIONS[i][0]];
           var b = landmarks[CONNECTIONS[i][1]];
@@ -183,15 +183,15 @@
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
-        ctx.fillStyle = bad ? "rgba(255, 107, 107, 0.22)" : "rgba(108, 99, 255, 0.22)";
+        ctx.fillStyle = bad ? "rgba(255, 107, 107, 0.22)" : "rgba(74, 68, 181, 0.22)";
         ctx.fill();
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = bad ? "#FF6B6B" : "#FFFFFF";
+        ctx.fillStyle = bad ? "#FF6B6B" : "#4A44B5";
         ctx.fill();
         ctx.lineWidth = 2;
-        ctx.strokeStyle = bad ? "rgba(255, 107, 107, 0.9)" : "rgba(108, 99, 255, 0.95)";
+        ctx.strokeStyle = bad ? "rgba(255, 107, 107, 0.9)" : "rgba(74, 68, 181, 0.95)";
         ctx.stroke();
       }
 
@@ -208,7 +208,7 @@
         ctx.beginPath();
         ctx.arc(np.x, np.y, headR, 0, Math.PI * 2);
         ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(146, 139, 255, 0.9)";
+        ctx.strokeStyle = "rgba(74, 68, 181, 0.9)";
         ctx.stroke();
       }
     }

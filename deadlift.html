@@ -39,9 +39,11 @@
     return 1;
   }
   function scoreSpine(spineAngleDeg) {
-    // ear-shoulder-hip angle; near 180 is a straight, neutral spine
-    if (spineAngleDeg >= 160) return 3;
-    if (spineAngleDeg >= 140) return 2;
+    // ear-shoulder-hip angle; near 180 is a straight, neutral spine.
+    // Head position and landmark noise cost 15-25 deg on a perfectly flat
+    // back, so the bands are deliberately forgiving.
+    if (spineAngleDeg >= 143) return 3;
+    if (spineAngleDeg >= 120) return 2;
     return 1;
   }
   function scoreLockout(ratio) {
@@ -61,6 +63,9 @@
   var lastRepScores = null;
 
   var smoothedAngle = null;
+  var smoothedSpine = null;
+  var SPINE_EMA_ALPHA = 0.2;    // heavier smoothing: spine landmarks are noisy
+  var EAR_VIS_MIN = 0.5;        // below this the ear point is unreliable
   var hingeStartTime = null;
   var hingeStartAngle = null;
   var minAngle = null;
@@ -143,8 +148,15 @@
       ? angle
       : smoothedAngle * (1 - EMA_ALPHA) + angle * EMA_ALPHA;
 
-    var spineAngle = FC.angleBetween(shoulder, ear, hip);
-    var spineNow = scoreSpine(spineAngle);
+    var earVis = earLm.visibility === undefined ? 1 : earLm.visibility;
+    var spineNow = 3;
+    if (earVis >= EAR_VIS_MIN) {
+      var spineAngle = FC.angleBetween(shoulder, ear, hip);
+      smoothedSpine = smoothedSpine === null
+        ? spineAngle
+        : smoothedSpine * (1 - SPINE_EMA_ALPHA) + spineAngle * SPINE_EMA_ALPHA;
+      spineNow = scoreSpine(smoothedSpine);
+    }
 
     var torsoLen = Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y);
     var lockoutRatio = torsoLen < 1e-6 ? 1 : Math.abs(shoulder.x - hip.x) / torsoLen;

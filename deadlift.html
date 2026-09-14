@@ -30,7 +30,7 @@
   var HINGE_TRIGGER_ANGLE = 70; // dropping below this starts a hinge
   var REVERSAL_MARGIN_DEG = 4;  // upward movement confirming the bottom
   var MIN_ROM_DEG = 20;         // minimum range of motion for a valid rep
-  var MIN_PHASE_MS = 500;       // minimum down-phase and up-phase duration
+  var MIN_PHASE_MS = 250;       // minimum down-phase and up-phase duration
   var EMA_ALPHA = 0.3;          // torso angle smoothing
 
   function scoreHinge(angleDeg) {
@@ -68,6 +68,8 @@
   var bottomAngle = null;
   var bottomTime = null;
   var spineWorstScore = 3;
+  var pendingRep = null;        // rep awaiting a settled lockout reading
+  var LOCKOUT_SETTLE_MS = 400;  // time at the top used to judge lockout
 
   var hingeScore = 3, spineScore = 3, lockoutScore = 3;
   var flaggedIndices = [];
@@ -82,15 +84,25 @@
     spineWorstScore = 3;
   }
 
-  function finalizeRep(lockoutRatio, now) {
+  function queueRep(lockoutRatio, now) {
     var downDuration = bottomTime - hingeStartTime;
     var upDuration = now - bottomTime;
     var rom = hingeStartAngle - bottomAngle;
     if (downDuration < MIN_PHASE_MS || upDuration < MIN_PHASE_MS || rom < MIN_ROM_DEG) return;
+    pendingRep = {
+      hinge: scoreHinge(bottomAngle),
+      spine: spineWorstScore,
+      bestLockoutRatio: lockoutRatio,
+      queuedAt: now
+    };
+  }
 
-    var h = scoreHinge(bottomAngle);
-    var s = spineWorstScore;
-    var l = scoreLockout(lockoutRatio);
+  function commitRep() {
+    if (!pendingRep) return;
+    var h = pendingRep.hinge;
+    var s = pendingRep.spine;
+    var l = scoreLockout(pendingRep.bestLockoutRatio);
+    pendingRep = null;
     var average = (h + s + l) / 3;
 
     hingeScore = h;
@@ -141,9 +153,15 @@
     var now = frame.now;
 
     if (repState === "standing") {
-      lockoutScore = lockoutNow;
-      spineScore = spineNow;
+      if (pendingRep) {
+        pendingRep.bestLockoutRatio = Math.min(pendingRep.bestLockoutRatio, lockoutRatio);
+        if (now - pendingRep.queuedAt >= LOCKOUT_SETTLE_MS) commitRep();
+      } else {
+        lockoutScore = lockoutNow;
+        spineScore = spineNow;
+      }
       if (smoothedAngle < HINGE_TRIGGER_ANGLE) {
+        commitRep();
         repState = "hinging";
         hingeStartTime = now;
         hingeStartAngle = smoothedAngle;
@@ -175,7 +193,7 @@
         hingeScore = scoreHinge(minAngle);
         repState = "hinging";
       } else if (smoothedAngle >= STANDING_ANGLE) {
-        finalizeRep(lockoutRatio, now);
+        queueRep(lockoutRatio, now);
         repState = "standing";
         resetRepTrackers();
       }

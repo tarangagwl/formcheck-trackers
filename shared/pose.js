@@ -151,29 +151,65 @@
         return { x: p.x * drawW + offsetX, y: p.y * drawH + offsetY };
       }
 
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(108, 99, 255, 0.85)";
-      for (var i = 0; i < CONNECTIONS.length; i++) {
-        var a = landmarks[CONNECTIONS[i][0]];
-        var b = landmarks[CONNECTIONS[i][1]];
-        if (!a || !b) continue;
-        if ((a.visibility || 0) < DRAW_VIS_THRESHOLD) continue;
-        if ((b.visibility || 0) < DRAW_VIS_THRESHOLD) continue;
-        var pa = point(a), pb = point(b);
-        ctx.beginPath();
-        ctx.moveTo(pa.x, pa.y);
-        ctx.lineTo(pb.x, pb.y);
-        ctx.stroke();
+      /* app palette: primary #6C63FF, success #6BCB77, error #FF6B6B */
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      for (var pass = 0; pass < 2; pass++) {
+        /* pass 0 = soft outer glow, pass 1 = crisp bone */
+        ctx.lineWidth = pass === 0 ? 11 : 3.5;
+        ctx.strokeStyle = pass === 0 ? "rgba(108, 99, 255, 0.18)" : "rgba(146, 139, 255, 0.95)";
+        for (var i = 0; i < CONNECTIONS.length; i++) {
+          var a = landmarks[CONNECTIONS[i][0]];
+          var b = landmarks[CONNECTIONS[i][1]];
+          if (!a || !b) continue;
+          if ((a.visibility || 0) < DRAW_VIS_THRESHOLD) continue;
+          if ((b.visibility || 0) < DRAW_VIS_THRESHOLD) continue;
+          var pa = point(a), pb = point(b);
+          ctx.beginPath();
+          ctx.moveTo(pa.x, pa.y);
+          ctx.lineTo(pb.x, pb.y);
+          ctx.stroke();
+        }
       }
 
-      for (var j = 0; j < landmarks.length; j++) {
+      /* joints: body only (skip the face mesh points) */
+      for (var j = 11; j < landmarks.length; j++) {
         var lm = landmarks[j];
         if (!lm || (lm.visibility || 0) < DRAW_VIS_THRESHOLD) continue;
         var p = point(lm);
+        var bad = !!flagged[j];
+        var r = bad ? 6.5 : 5;
+
         ctx.beginPath();
-        ctx.arc(p.x, p.y, flagged[j] ? 6 : 4, 0, Math.PI * 2);
-        ctx.fillStyle = flagged[j] ? "#ff6b6b" : "#6bcb77";
+        ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
+        ctx.fillStyle = bad ? "rgba(255, 107, 107, 0.22)" : "rgba(108, 99, 255, 0.22)";
         ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = bad ? "#FF6B6B" : "#FFFFFF";
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = bad ? "rgba(255, 107, 107, 0.9)" : "rgba(108, 99, 255, 0.95)";
+        ctx.stroke();
+      }
+
+      /* head marker from the nose landmark */
+      var nose = landmarks[0];
+      if (nose && (nose.visibility || 0) >= DRAW_VIS_THRESHOLD) {
+        var ls = landmarks[11], rs = landmarks[12];
+        var headR = 14;
+        if (ls && rs) {
+          var sa = point(ls), sb = point(rs);
+          headR = Math.max(10, Math.min(46, dist(sa, sb) * 0.55 || 14));
+        }
+        var np = point(nose);
+        ctx.beginPath();
+        ctx.arc(np.x, np.y, headR, 0, Math.PI * 2);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(146, 139, 255, 0.9)";
+        ctx.stroke();
       }
     }
 

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>FormCheck — Deadlift</title>
+<link rel="stylesheet" href="shared/style.css" />
+</head>
+<body>
+<video id="video" playsinline autoplay muted></video>
+<canvas id="canvas"></canvas>
+<div id="notice">
+  <p>Camera access is needed to analyse your deadlift. Allow access and tap retry.</p>
+  <button id="retry" type="button">Retry</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+<script src="shared/pose.js"></script>
+<script>
+/*
+ * Deadlift: hip hinge depth, spine neutrality, lockout. Side-on view.
+ */
+(function () {
+  "use strict";
+
+  var FC = window.FormCheck;
+  var LM = FC.LM;
+
+  /* thresholds carried over from the tuned reference build */
+  var STANDING_ANGLE = 75;      // torso angle from horizontal counted as upright
+  var HINGE_TRIGGER_ANGLE = 70; // dropping below this starts a hinge
+  var REVERSAL_MARGIN_DEG = 4;  // upward movement confirming the bottom
+  var MIN_ROM_DEG = 20;         // minimum range of motion for a valid rep
+  var MIN_PHASE_MS = 500;       // minimum down-phase and up-phase duration
+  var EMA_ALPHA = 0.3;          // torso angle smoothing
+
+  function scoreHinge(angleDeg) {
+    if (angleDeg < 45) return 3;
+    if (angleDeg <= 60) return 2;
+    return 1;
+  }
+  function scoreSpine(spineAngleDeg) {
+    // ear-shoulder-hip angle; near 180 is a straight, neutral spine
+    if (spineAngleDeg >= 160) return 3;
+    if (spineAngleDeg >= 140) return 2;
+    return 1;
+  }
+  function scoreLockout(ratio) {
+    // horizontal shoulder-to-hip offset, normalised by torso length
+    if (ratio < 0.08) return 3;
+    if (ratio <= 0.18) return 2;
+    return 1;
+  }
+
+  var pickSide = FC.createSideTracker(
+    [LM.LEFT_EAR, LM.LEFT_SHOULDER, LM.LEFT_HIP, LM.LEFT_KNEE],
+    [LM.RIGHT_EAR, LM.RIGHT_SHOULDER, LM.RIGHT_HIP, LM.RIGHT_KNEE]
+  );
+
+  var repState = "standing";
+  var repCount = 0;
+  var lastRepScores = null;
+
+  var smoothedAngle = null;
+  var hingeStartTime = null;
+  var hingeStartAngle = null;
+  var minAngle = null;
+  var minAngleTime = null;
+  var bottomAngle = null;
+  var bottomTime = null;
+  var spineWorstScore = 3;
+
+  var hingeScore = 3, spineScore = 3, lockoutScore = 3;
+  var flaggedIndices = [];
+
+  function resetRepTrackers() {
+    hingeStartTime = null;
+    hingeStartAngle = null;
+    minAngle = null;
+    minAngleTime = null;
+    bottomAngle = null;
+    bottomTime = null;
+    spineWorstScore = 3;
+  }
+
+  function finalizeRep(lockoutRatio, now) {
+    var downDuration = bottomTime - hingeStartTime;
+    var upDuration = now - bottomTime;
+    var rom = hingeStartAngle - bottomAngle;
+    if (downDuration < MIN_PHASE_MS || upDuration < MIN_PHASE_MS || rom < MIN_ROM_DEG) return;
+
+    var h = scoreHinge(bottomAngle);
+    var s = spineWorstScore;
+    var l = scoreLockout(lockoutRatio);
+    var average = (h + s + l) / 3;
+
+    hingeScore = h;
+    spineScore = s;
+    lockoutScore = l;
+    repCount += 1;
+    lastRepScores = {
+      hinge: h,
+      spine: s,
+      lockout: l,
+      average: Math.round(average * 100) / 100,
+      verdict: FC.verdictFromAverage(average)
+    };
+  }
+
+  function onFrame(landmarks, frame) {
+    var chosen = pickSide(landmarks);
+    if (chosen.visibility < FC.VIS_THRESHOLD) return;
+
+    var left = chosen.side === "left";
+    var idx = {
+      ear: left ? LM.LEFT_EAR : LM.RIGHT_EAR,
+      shoulder: left ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER,
+      hip: left ? LM.LEFT_HIP : LM.RIGHT_HIP
+    };
+
+    var earLm = landmarks[idx.ear];
+    var shoulderLm = landmarks[idx.shoulder];
+    var hipLm = landmarks[idx.hip];
+    if (!earLm || !shoulderLm || !hipLm) return;
+
+    /* work in pixel space so angles are not distorted by aspect ratio */
+    function px(lm) { return { x: lm.x * frame.width, y: lm.y * frame.height }; }
+    var ear = px(earLm), shoulder = px(shoulderLm), hip = px(hipLm);
+
+    var angle = FC.angleFromHorizontal(shoulder, hip);
+    smoothedAngle = smoothedAngle === null
+      ? angle
+      : smoothedAngle * (1 - EMA_ALPHA) + angle * EMA_ALPHA;
+
+    var spineAngle = FC.angleBetween(shoulder, ear, hip);
+    var spineNow = scoreSpine(spineAngle);
+
+    var torsoLen = Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y);
+    var lockoutRatio = torsoLen < 1e-6 ? 1 : Math.abs(shoulder.x - hip.x) / torsoLen;
+    var lockoutNow = scoreLockout(lockoutRatio);
+
+    var now = frame.now;
+
+    if (repState === "standing") {
+      lockoutScore = lockoutNow;
+      spineScore = spineNow;
+      if (smoothedAngle < HINGE_TRIGGER_ANGLE) {
+        repState = "hinging";
+        hingeStartTime = now;
+        hingeStartAngle = smoothedAngle;
+        minAngle = smoothedAngle;
+        minAngleTime = now;
+        spineWorstScore = spineNow;
+        hingeScore = scoreHinge(minAngle);
+      }
+    } else if (repState === "hinging") {
+      spineWorstScore = Math.min(spineWorstScore, spineNow);
+      spineScore = spineWorstScore;
+      if (smoothedAngle < minAngle) {
+        minAngle = smoothedAngle;
+        minAngleTime = now;
+        hingeScore = scoreHinge(minAngle);
+      } else if (smoothedAngle > minAngle + REVERSAL_MARGIN_DEG) {
+        bottomAngle = minAngle;
+        bottomTime = minAngleTime;
+        repState = "ascending";
+      }
+    } else if (repState === "ascending") {
+      spineWorstScore = Math.min(spineWorstScore, spineNow);
+      spineScore = spineWorstScore;
+      if (smoothedAngle < minAngle) {
+        minAngle = smoothedAngle;
+        minAngleTime = now;
+        bottomAngle = minAngle;
+        bottomTime = minAngleTime;
+        hingeScore = scoreHinge(minAngle);
+        repState = "hinging";
+      } else if (smoothedAngle >= STANDING_ANGLE) {
+        finalizeRep(lockoutRatio, now);
+        repState = "standing";
+        resetRepTrackers();
+      }
+    }
+
+    var flags = [];
+    if (spineNow < 3) flags.push(idx.ear, idx.shoulder);
+    if (lockoutNow < 3 && repState === "standing") flags.push(idx.hip, idx.shoulder);
+    flaggedIndices = flags;
+  }
+
+  function statusFor(score, badLabel) {
+    return score >= 3 ? "good" : badLabel;
+  }
+
+  function payload() {
+    return {
+      exercise: "deadlift",
+      repCount: repCount,
+      hingeScore: hingeScore,
+      spineScore: spineScore,
+      lockoutScore: lockoutScore,
+      hingeStatus: statusFor(hingeScore, "hinge"),
+      spineStatus: statusFor(spineScore, "spine"),
+      lockoutStatus: statusFor(lockoutScore, "lockout"),
+      latestCue: "",
+      lastRepScores: lastRepScores,
+      phase: repState
+    };
+  }
+
+  FC.start({
+    onFrame: onFrame,
+    payload: payload,
+    flagged: function () { return flaggedIndices; }
+  });
+})();
+</script>
+</body>
+</html>

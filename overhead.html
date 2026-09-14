@@ -36,13 +36,16 @@
      Keep a wide good band and reserve penalties for unmistakable curvature. */
   var BARPATH_SCORE1_NORM = 0.45; // severe curve: nearly half a torso length
   var BARPATH_SCORE2_NORM = 0.28; // clearly excessive curve
-  /* lockout is elbow extension at the peak, plus wrist height over the shoulder */
-  var LOCKOUT_ELBOW_GOOD_DEG = 155;
-  var LOCKOUT_ELBOW_PARTIAL_DEG = 135;
-  var LOCKOUT_HEIGHT_GOOD = 0.45;   // wrist above shoulder, in torso lengths
-  var LOCKOUT_HEIGHT_PARTIAL = 0.30;
-  var START_MOVE_FRAC = 0.05;     // wrist rise above rack that starts a rep
-  var RETURN_MARGIN_FRAC = 0.08;  // wrist back down at the rack
+  /* lockout is elbow extension at the peak, plus wrist height over the shoulder;
+     strict bands: anything short of near-straight arms overhead gets flagged */
+  var LOCKOUT_ELBOW_GOOD_DEG = 168;
+  var LOCKOUT_ELBOW_PARTIAL_DEG = 150;
+  var LOCKOUT_HEIGHT_GOOD = 0.50;   // wrist above shoulder, in torso lengths
+  var LOCKOUT_HEIGHT_PARTIAL = 0.38;
+
+  /* the rep counts once the bar comes back down to roughly eye/nose level;
+     it does not need to return all the way to the chest/rack */
+  var RETURN_MARGIN_FRAC = 0.38;  // wrist height above shoulder at which the rep closes
   var REP_MIN_TRAVEL_FRAC = 0.20; // required vertical travel
   var REP_TIMEOUT_MS = 6000;      // abandon a stuck rep attempt
 
@@ -214,7 +217,9 @@
           repData.peakElbowAngle !== null &&
           repData.peakElbowAngle < LOCKOUT_ELBOW_GOOD_DEG;
 
-        if (diffNorm > RETURN_MARGIN_FRAC * 1.5) repData.peaked = true;
+        /* the bar must have genuinely gone overhead (above the head) before the
+           rep is allowed to close */
+        if (diffNorm > 0.45) repData.peaked = true;
 
         if (repData.peaked && diffNorm < RETURN_MARGIN_FRAC) {
           var travelNorm = (repData.startShoulderY - repData.minWristY) / torsoLen;

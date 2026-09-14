@@ -23,8 +23,10 @@
     LEFT_FOOT: 31, RIGHT_FOOT: 32
   };
 
-  var VIS_THRESHOLD = 0.6;
-  var DRAW_VIS_THRESHOLD = 0.5;
+  var VIS_THRESHOLD = 0.45;
+  var DRAW_VIS_THRESHOLD = 0.25;
+  /* how long a skeleton stays on screen after the last successful detection */
+  var HOLD_MS = 700;
   var SEND_INTERVAL_MS = 500;
 
   var CONNECTIONS = [
@@ -177,6 +179,8 @@
 
     var landmarker = null;
     var lastVideoTime = -1;
+    var heldLandmarks = null;
+    var heldAt = 0;
 
     function normalise(list) {
       var maxVis = 0;
@@ -207,9 +211,9 @@
                 },
                 runningMode: "VIDEO",
                 numPoses: 1,
-                minPoseDetectionConfidence: 0.5,
-                minPosePresenceConfidence: 0.5,
-                minTrackingConfidence: 0.5
+                minPoseDetectionConfidence: 0.25,
+                minPosePresenceConfidence: 0.25,
+                minTrackingConfidence: 0.25
               });
             });
         })
@@ -237,20 +241,29 @@
       if (!landmarker) return;
 
       var now = performance.now();
-      if (video.currentTime === lastVideoTime) return;
-      lastVideoTime = video.currentTime;
+      var fresh = video.currentTime !== lastVideoTime;
 
-      var result;
-      try {
-        result = landmarker.detectForVideo(video, now);
-      } catch (e) {
-        return;
+      if (fresh) {
+        lastVideoTime = video.currentTime;
+        var result;
+        try {
+          result = landmarker.detectForVideo(video, now);
+        } catch (e) {
+          result = null;
+        }
+        if (result && result.landmarks && result.landmarks.length) {
+          var landmarks = normalise(result.landmarks[0]);
+          heldLandmarks = landmarks;
+          heldAt = now;
+          options.onFrame(landmarks, { width: vw, height: vh, now: now });
+        }
       }
-      if (!result || !result.landmarks || !result.landmarks.length) return;
 
-      var landmarks = normalise(result.landmarks[0]);
-      options.onFrame(landmarks, { width: vw, height: vh, now: now });
-      drawSkeleton(landmarks, drawW, drawH, offsetX, offsetY);
+      /* keep drawing the most recent pose briefly so the skeleton does not
+         flicker out on frames where detection momentarily drops */
+      if (heldLandmarks && now - heldAt < HOLD_MS) {
+        drawSkeleton(heldLandmarks, drawW, drawH, offsetX, offsetY);
+      }
     }
 
     var running = false;

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>FormCheck — Squat</title>
+<link rel="stylesheet" href="shared/style.css" />
+</head>
+<body>
+<video id="video" playsinline autoplay muted></video>
+<canvas id="canvas"></canvas>
+<div id="notice">
+  <p>Camera access is needed to analyse your squat. Allow access and tap retry.</p>
+  <button id="retry" type="button">Retry</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+<script src="shared/pose.js"></script>
+<script>
+/*
+ * Squat: depth, torso angle, heel contact. Side-on view.
+ * Knee tracking is deliberately not scored — it needs a front-facing camera.
+ */
+(function () {
+  "use strict";
+
+  var FC = window.FormCheck;
+  var LM = FC.LM;
+
+  /* thresholds carried over from the tuned reference build */
+  var DEPTH_PARALLEL_BAND = 0.015; // hip-vs-knee y difference, normalised units
+  var TORSO_BAD_DEG = 45;          // lean beyond this scores 1
+  var TORSO_WARN_DEG = 30;         // lean beyond this scores 2
+  var HEEL_BAD_PX = 15;            // heel rise beyond this scores 1
+  var HEEL_WARN_PX = 5;            // heel rise beyond this scores 2
+  var MIN_PHASE_MS = 500;          // minimum descent and ascent duration
+
+  function scoreDepth(diff) {
+    if (diff > DEPTH_PARALLEL_BAND) return 3;
+    if (diff >= -DEPTH_PARALLEL_BAND) return 2;
+    return 1;
+  }
+  function scoreTorso(deg) {
+    if (deg > TORSO_BAD_DEG) return 1;
+    if (deg >= TORSO_WARN_DEG) return 2;
+    return 3;
+  }
+  function scoreHeel(liftPx) {
+    if (liftPx > HEEL_BAD_PX) return 1;
+    if (liftPx >= HEEL_WARN_PX) return 2;
+    return 3;
+  }
+
+  var pickSide = FC.createSideTracker(
+    [LM.LEFT_SHOULDER, LM.LEFT_HIP, LM.LEFT_KNEE, LM.LEFT_ANKLE, LM.LEFT_HEEL],
+    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE, LM.RIGHT_HEEL]
+  );
+
+  var phase = "standing";
+  var repCount = 0;
+  var lastRepScores = null;
+
+  var smoothedHipY = null;
+  var prevHipY = null;
+  var standingBaselineHipY = null;
+  var heelBaselineY = null;
+  var descentCandidateStart = null;
+  var standCandidateStart = null;
+  var bottomHoldStart = null;
+  var descentStartTime = null;
+  var bottomTime = null;
+  var ascentStartTime = null;
+  var wentBelowParallel = false;
+
+  var worstDepth = -Infinity;
+  var worstTorso = 0;
+  var worstHeelLift = 0;
+
+  var depthScore = 3, torsoScore = 3, heelScore = 3;
+  var flaggedIndices = [];
+  var activeIdx = null;
+
+  function resetRepTrackers(heelY) {
+    heelBaselineY = heelY;
+    wentBelowParallel = false;
+    worstDepth = -Infinity;
+    worstTorso = 0;
+    worstHeelLift = 0;
+  }
+
+  function trackWorst(depthDiff, torsoAngle, heelY) {
+    worstTorso = Math.max(worstTorso, torsoAngle);
+    worstDepth = Math.max(worstDepth, depthDiff);
+    if (heelBaselineY !== null) worstHeelLift = Math.max(worstHeelLift, heelBaselineY - heelY);
+    if (depthDiff >= 0) wentBelowParallel = true;
+  }
+
+  function completeRep() {
+    var d = scoreDepth(worstDepth === -Infinity ? -1 : worstDepth);
+    var t = scoreTorso(worstTorso);
+    var h = scoreHeel(worstHeelLift);
+    var average = (d + t + h) / 3;
+
+    depthScore = d;
+    torsoScore = t;
+    heelScore = h;
+    repCount += 1;
+    lastRepScores = {
+      depth: d,
+      torso: t,
+      heel: h,
+      average: Math.round(average * 100) / 100,
+      verdict: FC.verdictFromAverage(average)
+    };
+  }
+
+  function onFrame(landmarks, frame) {
+    var chosen = pickSide(landmarks);
+    if (chosen.visibility < FC.VIS_THRESHOLD) return;
+
+    var left = chosen.side === "left";
+    var idx = {
+      shoulder: left ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER,
+      hip: left ? LM.LEFT_HIP : LM.RIGHT_HIP,
+      knee: left ? LM.LEFT_KNEE : LM.RIGHT_KNEE,
+      heel: left ? LM.LEFT_HEEL : LM.RIGHT_HEEL
+    };
+    activeIdx = idx;
+
+    var shoulder = landmarks[idx.shoulder];
+    var hip = landmarks[idx.hip];
+    var knee = landmarks[idx.knee];
+    var heel = landmarks[idx.heel];
+    if (!shoulder || !hip || !knee || !heel) return;
+
+    var depthDiff = hip.y - knee.y;               // positive = hips below knees
+    var torsoAngle = FC.angleFromVertical(hip, shoulder);
+    var heelY = heel.y * frame.height;
+    var legScale = Math.max(FC.dist(hip, knee), 0.03);
+    var now = frame.now;
+
+    smoothedHipY = smoothedHipY === null ? hip.y : smoothedHipY * 0.6 + hip.y * 0.4;
+    if (prevHipY === null) prevHipY = smoothedHipY;
+
+    var descendEps = legScale * 0.25;
+    var standEps = legScale * 0.15;
+    var reversalEps = legScale * 0.04;
+
+    /* live scores between reps so the app always has something to show */
+    var liveHeelLift = heelBaselineY === null ? 0 : heelBaselineY - heelY;
+    var liveFlags = [];
+    if (torsoAngle > TORSO_BAD_DEG) {
+      liveFlags.push(idx.shoulder, idx.hip);
+    }
+    if (liveHeelLift > HEEL_BAD_PX) liveFlags.push(idx.heel);
+    flaggedIndices = liveFlags;
+
+    if (phase === "standing") {
+      standingBaselineHipY = standingBaselineHipY === null
+        ? smoothedHipY
+        : standingBaselineHipY * 0.9 + smoothedHipY * 0.1;
+
+      if (smoothedHipY - standingBaselineHipY > descendEps) {
+        if (descentCandidateStart === null) descentCandidateStart = now;
+        if (now - descentCandidateStart >= MIN_PHASE_MS) {
+          phase = "descending";
+          descentStartTime = descentCandidateStart;
+          descentCandidateStart = null;
+          resetRepTrackers(heelY);
+        }
+      } else {
+        descentCandidateStart = null;
+      }
+    } else if (phase === "descending") {
+      trackWorst(depthDiff, torsoAngle, heelY);
+      if (smoothedHipY < prevHipY - reversalEps) {
+        phase = "bottom";
+        bottomTime = now;
+        bottomHoldStart = now;
+      }
+    } else if (phase === "bottom") {
+      trackWorst(depthDiff, torsoAngle, heelY);
+      if (smoothedHipY < prevHipY - reversalEps * 0.5) {
+        if (now - bottomHoldStart >= 100) {
+          phase = "ascending";
+          ascentStartTime = now;
+        }
+      } else {
+        bottomHoldStart = now;
+        bottomTime = now;
+      }
+    } else if (phase === "ascending") {
+      trackWorst(depthDiff, torsoAngle, heelY);
+      if (standingBaselineHipY !== null && smoothedHipY - standingBaselineHipY <= standEps) {
+        if (standCandidateStart === null) standCandidateStart = now;
+        if (now - standCandidateStart >= MIN_PHASE_MS) {
+          var descDuration = (bottomTime || now) - descentStartTime;
+          var ascDuration = now - ascentStartTime;
+          if (wentBelowParallel && descDuration >= MIN_PHASE_MS && ascDuration >= MIN_PHASE_MS) {
+            completeRep();
+          }
+          phase = "standing";
+          standCandidateStart = null;
+          descentCandidateStart = null;
+        }
+      } else {
+        standCandidateStart = null;
+      }
+    }
+
+    prevHipY = smoothedHipY;
+  }
+
+  function statusFor(score, badLabel) {
+    return score >= 3 ? "good" : badLabel;
+  }
+
+  function payload() {
+    return {
+      exercise: "squat",
+      repCount: repCount,
+      depthScore: depthScore,
+      torsoScore: torsoScore,
+      heelScore: heelScore,
+      depthStatus: statusFor(depthScore, "depth"),
+      torsoStatus: statusFor(torsoScore, "torso"),
+      heelStatus: statusFor(heelScore, "heel"),
+      latestCue: "",
+      lastRepScores: lastRepScores,
+      phase: phase
+    };
+  }
+
+  FC.start({
+    onFrame: onFrame,
+    payload: payload,
+    flagged: function () { return flaggedIndices; }
+  });
+
+  void activeIdx;
+})();
+</script>
+</body>
+</html>

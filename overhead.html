@@ -43,16 +43,47 @@
   var LOCKOUT_HEIGHT_GOOD = 0.50;   // wrist above shoulder, in torso lengths
   var LOCKOUT_HEIGHT_PARTIAL = 0.38;
 
+  /* A press begins once the wrist has clearly left the rack position. This was
+     previously referenced without being defined, which stopped the overhead
+     tracking loop as soon as a pose was detected. */
+  var START_MOVE_FRAC = 0.08;
   /* the rep counts once the bar comes back down to roughly eye/nose level;
      it does not need to return all the way to the chest/rack */
   var RETURN_MARGIN_FRAC = 0.38;  // wrist height above shoulder at which the rep closes
   var REP_MIN_TRAVEL_FRAC = 0.20; // required vertical travel
   var REP_TIMEOUT_MS = 6000;      // abandon a stuck rep attempt
+  var CORE_VIS_THRESHOLD = 0.30;
+  var ARM_VIS_THRESHOLD = 0.20;
+  var ARM_HOLD_MS = 1000;
 
+  /* Use the same stable side selection as the other lifts, but select from the
+     torso rather than the hands. Wrist confidence naturally falls at distance
+     and while passing the face, and must not make the tracker swap sides. */
   var pickSide = FC.createSideTracker(
-    [LM.LEFT_SHOULDER, LM.LEFT_HIP, LM.LEFT_WRIST, LM.LEFT_ELBOW],
-    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP, LM.RIGHT_WRIST, LM.RIGHT_ELBOW]
+    [LM.LEFT_SHOULDER, LM.LEFT_HIP],
+    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP]
   );
+
+  var armCache = {
+    left: { wrist: null, elbow: null },
+    right: { wrist: null, elbow: null }
+  };
+
+  function heldArmLandmark(landmarks, index, slot, now) {
+    var current = landmarks[index];
+    var visibility = current && typeof current.visibility === "number" ? current.visibility : 0;
+    if (current && visibility >= ARM_VIS_THRESHOLD) {
+      slot.value = {
+        point: { x: current.x, y: current.y, z: current.z, visibility: visibility },
+        at: now
+      };
+      return { point: current, fresh: true };
+    }
+    if (slot.value && now - slot.value.at <= ARM_HOLD_MS) {
+      return { point: slot.value.point, fresh: false };
+    }
+    return { point: null, fresh: false };
+  }
 
   /* max horizontal distance of the recorded wrist path from the straight line
      between its first and last point, normalised by torso length */
@@ -115,7 +146,8 @@
   }
 
   function onFrame(landmarks, frame) {
-    var side = repState === "pressing" && repData ? repData.side : pickSide(landmarks).side;
+    var chosen = pickSide(landmarks);
+    var side = repState === "pressing" && repData ? repData.side : chosen.side;
     var left = side === "left";
     var idx = {
       shoulder: left ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER,
@@ -126,16 +158,24 @@
 
     var shoulderLm = landmarks[idx.shoulder];
     var hipLm = landmarks[idx.hip];
-    var wristLm = landmarks[idx.wrist];
-    var elbowLm = landmarks[idx.elbow];
+    var sideCache = armCache[side];
+    var wristReading = heldArmLandmark(landmarks, idx.wrist, {
+      get value() { return sideCache.wrist; },
+      set value(value) { sideCache.wrist = value; }
+    }, frame.now);
+    var elbowReading = heldArmLandmark(landmarks, idx.elbow, {
+      get value() { return sideCache.elbow; },
+      set value(value) { sideCache.elbow = value; }
+    }, frame.now);
+    var wristLm = wristReading.point;
+    var elbowLm = elbowReading.point;
     flaggedIndices = [];
 
     var visOk = shoulderLm && hipLm && wristLm &&
-      (shoulderLm.visibility || 0) >= FC.VIS_THRESHOLD &&
-      (hipLm.visibility || 0) >= FC.VIS_THRESHOLD &&
-      (wristLm.visibility || 0) >= FC.VIS_THRESHOLD;
+      (shoulderLm.visibility || 0) >= CORE_VIS_THRESHOLD &&
+      (hipLm.visibility || 0) >= CORE_VIS_THRESHOLD;
 
-    var elbowOk = elbowLm && (elbowLm.visibility || 0) >= FC.VIS_THRESHOLD;
+    var elbowOk = !!elbowLm;
 
     if (!visOk) {
       if (repState === "pressing" && repData && frame.now - repData.startTime > REP_TIMEOUT_MS) {
@@ -160,7 +200,7 @@
     var diffNorm = (shoulderY - wristY) / torsoLen; // positive = wrist above shoulder
 
     if (repState === "idle") {
-      if (diffNorm > START_MOVE_FRAC) {
+      if (wristReading.fresh && diffNorm > START_MOVE_FRAC) {
         repState = "pressing";
         repData = {
           side: side,
@@ -196,7 +236,7 @@
            movement around the face should not look like an active fault. */
         liveBarPathBad = pathDeviation(repData.path, torsoLen) > BARPATH_SCORE1_NORM;
 
-        if (wristY < repData.minWristY) {
+        if (wristReading.fresh && wristY < repData.minWristY) {
           repData.minWristY = wristY;
           repData.peakShoulderX = shoulderX;
           repData.peakWristX = wristX;

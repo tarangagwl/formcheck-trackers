@@ -48,8 +48,9 @@
   }
   function scoreLockout(ratio) {
     // horizontal shoulder-to-hip offset, normalised by torso length
-    if (ratio < 0.08) return 3;
-    if (ratio <= 0.18) return 2;
+    // slightly forgiving: the body does not need to be perfectly straight
+    if (ratio < 0.10) return 3;
+    if (ratio <= 0.22) return 2;
     return 1;
   }
 
@@ -75,7 +76,7 @@
   var spineWorstScore = 3;
   var pendingRep = null;        // rep awaiting a settled lockout reading
   var LOCKOUT_SETTLE_MS = 400;  // time at the top used to judge lockout
-  var LOCKOUT_SCORE_ANGLE = 72; // only judge lockout when near-upright
+  var LOCKOUT_SCORE_ANGLE = 68; // only judge lockout when near-upright
 
   var hingeScore = 3, spineScore = 3, lockoutScore = 3;
   var flaggedIndices = [];
@@ -107,7 +108,7 @@
     if (!pendingRep) return;
     var h = pendingRep.hinge;
     var s = pendingRep.spine;
-    var l = scoreLockout(pendingRep.bestLockoutRatio);
+    var l = scoreLockout(pendingRep.bestLockourRatio);
     pendingRep = null;
     var average = (h + s + l) / 3;
 

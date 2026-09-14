@@ -32,8 +32,10 @@
   /* bar path is judged as deviation from the straight line joining the rack
      position to the overhead peak, not as raw horizontal travel: moving the bar
      back over the head during a press is correct form, not drift. */
-  var BARPATH_SCORE1_NORM = 0.22; // clearly curved path
-  var BARPATH_SCORE2_NORM = 0.12; // slightly curved path
+  /* Natural presses move around the face and camera jitter exaggerates the arc.
+     Keep a wide good band and reserve penalties for unmistakable curvature. */
+  var BARPATH_SCORE1_NORM = 0.45; // severe curve: nearly half a torso length
+  var BARPATH_SCORE2_NORM = 0.28; // clearly excessive curve
   /* lockout is elbow extension at the peak, plus wrist height over the shoulder */
   var LOCKOUT_ELBOW_GOOD_DEG = 155;
   var LOCKOUT_ELBOW_PARTIAL_DEG = 135;
@@ -187,7 +189,9 @@
           repData.path.push({ x: wristX, y: wristY });
           if (repData.path.length > 240) repData.path.shift();
         }
-        liveBarPathBad = pathDeviation(repData.path, torsoLen) > BARPATH_SCORE2_NORM;
+        /* Live highlighting is reserved for severe drift; ordinary forward/back
+           movement around the face should not look like an active fault. */
+        liveBarPathBad = pathDeviation(repData.path, torsoLen) > BARPATH_SCORE1_NORM;
 
         if (wristY < repData.minWristY) {
           repData.minWristY = wristY;

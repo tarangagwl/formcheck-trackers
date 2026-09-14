@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>FormCheck — Overhead Press</title>
+<link rel="stylesheet" href="shared/style.css" />
+</head>
+<body>
+<video id="video" playsinline autoplay muted></video>
+<canvas id="canvas"></canvas>
+<div id="notice">
+  <p>Camera access is needed to analyse your press. Allow access and tap retry.</p>
+  <button id="retry" type="button">Retry</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+<script src="shared/pose.js"></script>
+<script>
+/*
+ * Overhead press: torso lean, bar path, lockout. Side-on view.
+ */
+(function () {
+  "use strict";
+
+  var FC = window.FormCheck;
+  var LM = FC.LM;
+
+  /* thresholds carried over from the tuned reference build */
+  var TORSO_BAD_LIMIT_DEG = 15;   // live highlight threshold
+  var TORSO_SCORE1_DEG = 25;      // lean beyond this scores 1
+  var TORSO_SCORE2_DEG = 15;      // lean beyond this scores 2
+  var BARPATH_SCORE1_NORM = 0.15; // significant horizontal drift
+  var BARPATH_SCORE2_NORM = 0.07; // minor drift
+  var LOCKOUT_SCORE1_NORM = 0.15; // wrist well forward of shoulder at peak
+  var LOCKOUT_SCORE2_NORM = 0.05; // partial lockout
+  var START_MOVE_FRAC = 0.05;     // wrist rise above rack that starts a rep
+  var RETURN_MARGIN_FRAC = 0.08;  // wrist back down at the rack
+  var REP_MIN_TRAVEL_FRAC = 0.20; // required vertical travel
+  var REP_TIMEOUT_MS = 6000;      // abandon a stuck rep attempt
+
+  var pickSide = FC.createSideTracker(
+    [LM.LEFT_SHOULDER, LM.LEFT_HIP, LM.LEFT_WRIST],
+    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP, LM.RIGHT_WRIST]
+  );
+
+  var repState = "idle";
+  var repData = null;
+  var repCount = 0;
+  var lastRepScores = null;
+
+  var torsoScore = 3, barPathScore = 3, lockoutScore = 3;
+  var flaggedIndices = [];
+
+  function completeRep(rd) {
+    var t = rd.maxTorsoAngle > TORSO_SCORE1_DEG ? 1 : (rd.maxTorsoAngle > TORSO_SCORE2_DEG ? 2 : 3);
+    var b = rd.maxDriftNorm > BARPATH_SCORE1_NORM ? 1 : (rd.maxDriftNorm > BARPATH_SCORE2_NORM ? 2 : 3);
+
+    var peakTorsoLen = rd.peakTorsoLen || rd.torsoLenRef;
+    var lockoutNorm = ((rd.peakWristX - rd.peakShoulderX) * rd.facingSign) / peakTorsoLen;
+    var l = lockoutNorm > LOCKOUT_SCORE1_NORM ? 1 : (lockoutNorm > LOCKOUT_SCORE2_NORM ? 2 : 3);
+
+    var average = (t + b + l) / 3;
+
+    torsoScore = t;
+    barPathScore = b;
+    lockoutScore = l;
+    repCount += 1;
+    lastRepScores = {
+      torso: t,
+      barPath: b,
+      lockout: l,
+      average: Math.round(average * 100) / 100,
+      verdict: FC.verdictFromAverage(average)
+    };
+  }
+
+  function onFrame(landmarks, frame) {
+    var side = repState === "pressing" && repData ? repData.side : pickSide(landmarks).side;
+    var left = side === "left";
+    var idx = {
+      shoulder: left ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER,
+      hip: left ? LM.LEFT_HIP : LM.RIGHT_HIP,
+      wrist: left ? LM.LEFT_WRIST : LM.RIGHT_WRIST
+    };
+
+    var shoulderLm = landmarks[idx.shoulder];
+    var hipLm = landmarks[idx.hip];
+    var wristLm = landmarks[idx.wrist];
+    flaggedIndices = [];
+
+    var visOk = shoulderLm && hipLm && wristLm &&
+      (shoulderLm.visibility || 0) >= FC.VIS_THRESHOLD &&
+      (hipLm.visibility || 0) >= FC.VIS_THRESHOLD &&
+      (wristLm.visibility || 0) >= FC.VIS_THRESHOLD;
+
+    if (!visOk) {
+      if (repState === "pressing" && repData && frame.now - repData.startTime > REP_TIMEOUT_MS) {
+        repState = "idle";
+        repData = null;
+      }
+      return;
+    }
+
+    var shoulderX = shoulderLm.x * frame.width, shoulderY = shoulderLm.y * frame.height;
+    var hipX = hipLm.x * frame.width, hipY = hipLm.y * frame.height;
+    var wristX = wristLm.x * frame.width, wristY = wristLm.y * frame.height;
+
+    var torsoLen = Math.hypot(shoulderX - hipX, shoulderY - hipY);
+    if (torsoLen < 1) return;
+
+    var angleDeg = Math.abs((Math.atan2(shoulderX - hipX, hipY - shoulderY) * 180) / Math.PI);
+    var liveTorsoBad = angleDeg > TORSO_BAD_LIMIT_DEG;
+    var liveBarPathBad = false;
+    var liveLockoutBad = false;
+
+    var diffNorm = (shoulderY - wristY) / torsoLen; // positive = wrist above shoulder
+
+    if (repState === "idle") {
+      if (diffNorm > START_MOVE_FRAC) {
+        repState = "pressing";
+        repData = {
+          side: side,
+          startTime: frame.now,
+          startWristX: wristX,
+          startShoulderY: shoulderY,
+          facingSign: wristX - shoulderX >= 0 ? 1 : -1,
+          maxTorsoAngle: angleDeg,
+          maxDriftNorm: 0,
+          minWristY: wristY,
+          peakShoulderX: shoulderX,
+          peakWristX: wristX,
+          peakTorsoLen: torsoLen,
+          torsoLenRef: torsoLen
+        };
+      }
+    } else if (repState === "pressing") {
+      if (frame.now - repData.startTime > REP_TIMEOUT_MS) {
+        repState = "idle";
+        repData = null;
+      } else {
+        repData.maxTorsoAngle = Math.max(repData.maxTorsoAngle, angleDeg);
+
+        var driftNorm = Math.abs(wristX - repData.startWristX) / torsoLen;
+        repData.maxDriftNorm = Math.max(repData.maxDriftNorm, driftNorm);
+        liveBarPathBad = driftNorm > BARPATH_SCORE2_NORM;
+
+        if (wristY < repData.minWristY) {
+          repData.minWristY = wristY;
+          repData.peakShoulderX = shoulderX;
+          repData.peakWristX = wristX;
+          repData.peakTorsoLen = torsoLen;
+        }
+
+        var lockoutNormLive =
+          ((repData.peakWristX - repData.peakShoulderX) * repData.facingSign) / repData.peakTorsoLen;
+        liveLockoutBad = lockoutNormLive > LOCKOUT_SCORE2_NORM && diffNorm > START_MOVE_FRAC * 2;
+
+        if (diffNorm < RETURN_MARGIN_FRAC) {
+          var travelNorm = (repData.startShoulderY - repData.minWristY) / torsoLen;
+          if (travelNorm >= REP_MIN_TRAVEL_FRAC) completeRep(repData);
+          repState = "idle";
+          repData = null;
+        }
+      }
+    }
+
+    var flags = [];
+    if (liveTorsoBad) flags.push(idx.shoulder, idx.hip);
+    if (liveBarPathBad || liveLockoutBad) flags.push(idx.wrist, idx.shoulder);
+    flaggedIndices = flags;
+  }
+
+  function statusFor(score, badLabel) {
+    return score >= 3 ? "good" : badLabel;
+  }
+
+  function payload() {
+    return {
+      exercise: "overhead",
+      repCount: repCount,
+      torsoScore: torsoScore,
+      barPathScore: barPathScore,
+      lockoutScore: lockoutScore,
+      torsoStatus: statusFor(torsoScore, "torso"),
+      barPathStatus: statusFor(barPathScore, "barpath"),
+      lockoutStatus: statusFor(lockoutScore, "lockout"),
+      latestCue: "",
+      lastRepScores: lastRepScores,
+      phase: repState
+    };
+  }
+
+  FC.start({
+    onFrame: onFrame,
+    payload: payload,
+    flagged: function () { return flaggedIndices; }
+  });
+})();
+</script>
+</body>
+</html>

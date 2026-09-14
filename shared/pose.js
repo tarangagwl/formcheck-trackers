@@ -105,7 +105,7 @@
     };
   }
 
-  /* ------------------------------------------------------------ messaging */
+  /* --------------------------------------------------------------- messaging */
 
   function send(payload) {
     var json = JSON.stringify(payload);
@@ -120,7 +120,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* -------------------------------------------------------------- runtime */
+  /* --------------------------------------------------------------- runtime */
 
   /**
    * options.onFrame(landmarks, ctx) -> void
@@ -151,7 +151,7 @@
         return { x: p.x * drawW + offsetX, y: p.y * drawH + offsetY };
       }
 
-      /* app palette: primary #6C63FF, darker joint purple #4A44B5, success #6BCB77, error #FF6B6B */
+      /* app palette: primary #6C63FF, darker joint purple #4A44B5, success #6BCB77, error #FF6B6D */
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
@@ -188,7 +188,7 @@
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = bad ? "#FF6B6B" : "#4A44B5";
+        ctx.fillStyle = bad ? "#FF6B6D" : "#4A44B5";
         ctx.fill();
         ctx.lineWidth = 2;
         ctx.strokeStyle = bad ? "rgba(255, 107, 107, 0.9)" : "rgba(74, 68, 181, 0.95)";
@@ -217,6 +217,32 @@
     var lastVideoTime = -1;
     var heldLandmarks = null;
     var heldAt = 0;
+    var smoothed = null;
+
+    /* Exponential smoothing of the drawn skeleton. Analysis still uses the raw
+       landmarks so tuned thresholds are unaffected; this only steadies the
+       overlay, which jitters most when the arms travel overhead. */
+    function smooth(list) {
+      if (!smoothed || smoothed.length !== list.length) {
+        smoothed = list.map(function (p) {
+          return { x: p.x, y: p.y, z: p.z, visibility: p.visibility };
+        });
+        return smoothed;
+      }
+      var a = 0.55;
+      for (var i = 0; i < list.length; i++) {
+        var s = smoothed[i], p = list[i];
+        s.x += (p.x - s.x) * a;
+        s.y += (p.y - s.y) * a;
+        s.z = p.z;
+        var v = typeof p.visibility === "number" ? p.visibility : 1;
+        var sv = typeof s.visibility === "number" ? s.visibility : v;
+        /* rise fast, fall slow: a momentary confidence dip should not blank a limb */
+        s.visibility = v > sv ? v : sv + (v - sv) * 0.2;
+      }
+      return smoothed;
+    }
+
 
     function normalise(list) {
       var maxVis = 0;
@@ -234,28 +260,36 @@
     }
 
     function loadModel() {
+      var MODEL =
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
+      /* GPU init fails silently on some phone browsers; fall back to CPU rather
+         than running with no landmarker at all */
+      var DELEGATES = ["GPU", "CPU"];
       import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs")
         .then(function (vision) {
           return vision.FilesetResolver
             .forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm")
             .then(function (fileset) {
-              return vision.PoseLandmarker.createFromOptions(fileset, {
-                baseOptions: {
-                  modelAssetPath:
-                    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
-                  delegate: "GPU"
-                },
-                runningMode: "VIDEO",
-                numPoses: 1,
-                minPoseDetectionConfidence: 0.25,
-                minPosePresenceConfidence: 0.25,
-                minTrackingConfidence: 0.25
-              });
+              function attempt(i) {
+                return vision.PoseLandmarker.createFromOptions(fileset, {
+                  baseOptions: { modelAssetPath: MODEL, delegate: DELEGATES[i] },
+                  runningMode: "VIDEO",
+                  numPoses: 1,
+                  minPoseDetectionConfidence: 0.25,
+                  minPosePresenceConfidence: 0.25,
+                  minTrackingConfidence: 0.25
+                }).catch(function (err) {
+                  if (i + 1 < DELEGATES.length) return attempt(i + 1);
+                  throw err;
+                });
+              }
+              return attempt(0);
             });
         })
         .then(function (lm) { landmarker = lm; })
         .catch(function () { landmarker = null; });
     }
+
 
     function render() {
       requestAnimationFrame(render);
@@ -275,7 +309,6 @@
       ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
 
       if (!landmarker) return;
-
       var now = performance.now();
       var fresh = video.currentTime !== lastVideoTime;
 
@@ -289,7 +322,7 @@
         }
         if (result && result.landmarks && result.landmarks.length) {
           var landmarks = normalise(result.landmarks[0]);
-          heldLandmarks = landmarks;
+          heldLandmarks = smooth(landmarks);
           heldAt = now;
           options.onFrame(landmarks, { width: vw, height: vh, now: now });
         }

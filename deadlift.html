@@ -75,6 +75,7 @@
   var spineWorstScore = 3;
   var pendingRep = null;        // rep awaiting a settled lockout reading
   var LOCKOUT_SETTLE_MS = 400;  // time at the top used to judge lockout
+  var LOCKOUT_SCORE_ANGLE = 72; // only judge lockout when near-upright
 
   var hingeScore = 3, spineScore = 3, lockoutScore = 3;
   var flaggedIndices = [];
@@ -166,10 +167,16 @@
 
     if (repState === "standing") {
       if (pendingRep) {
-        pendingRep.bestLockoutRatio = Math.min(pendingRep.bestLockoutRatio, lockoutRatio);
-        if (now - pendingRep.queuedAt >= LOCKOUT_SETTLE_MS) commitRep();
+        if (smoothedAngle >= LOCKOUT_SCORE_ANGLE) {
+          // still at the top: keep the best lockout reading from near-upright frames
+          pendingRep.bestLockoutRatio = Math.min(pendingRep.bestLockoutRatio, lockoutRatio);
+          if (now - pendingRep.queuedAt >= LOCKOUT_SETTLE_MS) commitRep();
+        } else {
+          // already heading back down: judge the lockout from what the top showed
+          commitRep();
+        }
       } else {
-        lockoutScore = lockoutNow;
+        if (smoothedAngle >= LOCKOUT_SCORE_ANGLE) lockoutScore = lockoutNow;
         spineScore = spineNow;
       }
       if (smoothedAngle < HINGE_TRIGGER_ANGLE) {
@@ -213,7 +220,9 @@
 
     var flags = [];
     if (spineNow < 3) flags.push(idx.ear, idx.shoulder);
-    if (lockoutNow < 3 && repState === "standing") flags.push(idx.hip, idx.shoulder);
+    if (lockoutNow < 3 && repState === "standing" && smoothedAngle >= LOCKOUT_SCORE_ANGLE) {
+      flags.push(idx.hip, idx.shoulder);
+    }
     flaggedIndices = flags;
   }
 
